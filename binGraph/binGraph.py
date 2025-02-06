@@ -1,21 +1,17 @@
 #!/usr/bin/env python
 # encoding: utf-8
-
-from __future__ import absolute_import
+import importlib
 import sys
-import pkgutil
 import os
 import logging
 import argparse
 import io
 import base64
 import json
-import datetime
 
 __version__ = {}
 __version__["codename"] = "Iron Airedale"  # http://www.codenamegenerator.com/?prefix=metal&dictionary=dogs
-__version__["digit"] = 3.3
-__version__["run_date"] = datetime.datetime.now().isoformat()
+__version__["digit"] = 3.4
 
 
 # ## Global graphing default values
@@ -36,20 +32,18 @@ log = logging.getLogger("binGraph")
 log.setLevel(logging.INFO)
 
 # ### Helper functions
+CWD = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, CWD)
 
 
 def File2Strings(filename):
-    try:
-        f = open(filename, "r")
-    except:
+    if not os.path.exists(filename) or not os.path.isfile(filename):
         return None
     try:
-        return [line.rstrip("\n") for line in f.readlines()]
-    except:
-        return None
-    finally:
-        f.close()
-
+        with open(filename, "r") as f:
+            return [line.rstrip("\n") for line in f.readlines()]
+    except Exception as e:
+        log.error("Bingraph load file error: %s", str(e))
 
 # # Gather files to process - give it a list of paths (files or directories)
 # # and it will return all files in a list
@@ -57,26 +51,21 @@ def find_files(search_paths, recurse):
 
     __files__ = []
     for f in search_paths:
-
         if recurse and os.path.isdir(f):
-
             for dir_name, dirs, files in os.walk(f):
-                log.debug("Found directory: {}".format(dir_name))
-
+                log.debug("Found directory: %s", dir_name)
                 for fname in files:
                     abs_fpath = os.path.join(dir_name, fname)
-
                     if os.path.isfile(abs_fpath) and not os.path.islink(abs_fpath) and not os.stat(abs_fpath).st_size == 0:
-                        log.info('File found: "{}"'.format(abs_fpath))
+                        log.info('File found: "%s"', abs_fpath)
                         __files__.append(abs_fpath)
-
         elif os.path.isfile(f) and not os.path.islink(f) and not os.stat(f).st_size == 0:
             abs_fpath = os.path.abspath(f)
-            log.debug('Found file: "{}"'.format(abs_fpath))
+            log.debug('Found file: "%s"', abs_fpath)
             __files__.append(abs_fpath)
 
         else:
-            log.critical('Not a file, skipping: "{}"'.format(f))
+            log.critical('Not a file, skipping: "%s"', f)
             pass
 
     return __files__
@@ -84,7 +73,6 @@ def find_files(search_paths, recurse):
 
 # # Cleanup given filename
 def clean_fname(fn):
-
     return "".join([c for c in fn if c.isalnum()])
 
 
@@ -92,17 +80,15 @@ def clean_fname(fn):
 def gen_names(ffrmt, abs_fpath, abs_save_path, save_prefix=None, graphtype=None, findex=None):
 
     base_save_fname = "{prefix}-{findex}-{graphtype}-{cleaned_fname}.{ffrmt}"
-
     if save_prefix:
         save_fname = base_save_fname.replace("{prefix}", save_prefix)
     else:
         save_fname = base_save_fname.replace("{prefix}-", "")
 
     save_fname = save_fname.replace("{graphtype}", graphtype)
-
     cleaned_fname = clean_fname(os.path.basename(abs_fpath))
 
-    if type(findex) == int:
+    if isinstance(findex, int):
         save_fname = save_fname.replace("{findex}", str(findex))
         save_fname = save_fname.replace("{cleaned_fname}", cleaned_fname)
     else:
@@ -110,50 +96,17 @@ def gen_names(ffrmt, abs_fpath, abs_save_path, save_prefix=None, graphtype=None,
         save_fname = save_fname.replace("-{cleaned_fname}", "")
 
     save_fname = save_fname.replace("{ffrmt}", ffrmt)
-
     abs_save_fpath = os.path.join(abs_save_path, save_fname)
-
     return abs_save_fpath, os.path.basename(abs_fpath), cleaned_fname
-
-
-# # Dynamically import graphtypes
-def get_graph_modules():
-
-    graphs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "graphs")
-    graph_individuals = [x[0] for x in os.walk(graphs_dir)][1:]
-
-    modules = {}
-
-    for graph in graph_individuals:
-
-        for importer, package_name, _ in pkgutil.iter_modules([graph]):
-
-            if sys.version_info[0] < 3:
-                full_package_name = "{}".format(os.path.basename(graph))
-            else:
-                full_package_name = "{}.graph".format(os.path.basename(graph), package_name)
-
-            if not (full_package_name in sys.modules):
-
-                if sys.version_info[0] < 3:
-                    module = importer.find_module("graph", graph)
-                else:
-                    module = importer.find_module(full_package_name)
-
-                if module:
-                    module = module.load_module(full_package_name)
-
-                modules[os.path.basename(graph)] = module
-
-    return modules
-
 
 # # Try and import the graphs
 try:
-    graphs = get_graph_modules()
+    graphs = {}
+    for graph_name in ("ent", "hist"):
+        graphs[graph_name] = importlib.import_module(f"graphs.{graph_name}.graph")
+
 except Exception as e:
     log.critical("Failed to import graph: {}".format(e))
-    exit(0)
 
 # # Main routine - import this and provide a
 def generate_graphs(args_dict):
@@ -163,27 +116,27 @@ def generate_graphs(args_dict):
         See individual graphs for possible arguments
 
         args_dict = {
-          'files': ['/home/molley/bad_file.exe'],
-          'recurse': False,
-          '__dummy': False,
-          'prefix': None,
-          'save_dir': '/home/molley/output/',
-          'json': False,
-          'graphtitle': None,
-          'showplt': False,
-          'format': 'png',
-          'figsize': (12, 4),
-          'dpi': 100,
-          'blob': False,
-          'verbose': False,
-          'graphtype': 'ent',
-          'chunks': 750,
-          'ibytes': [{
+            'files': ['/home/molley/bad_file.exe'],
+            'recurse': False,
+            '__dummy': False,
+            'prefix': None,
+            'save_dir': '/home/molley/output/',
+            'json': False,
+            'graphtitle': None,
+            'showplt': False,
+            'format': 'png',
+            'figsize': (12, 4),
+            'dpi': 100,
+            'blob': False,
+            'verbose': False,
+            'graphtype': 'ent',
+            'chunks': 750,
+            'ibytes': [{
             'name': '0s',
             'bytes': [0],
             'colour': (0.0, 1.0, 0.0, 1.0)
-          }],
-          'entcolour': '#ff00ff'
+            }],
+            'entcolour': '#ff00ff'
         }
     """
 
@@ -194,7 +147,7 @@ def generate_graphs(args_dict):
 
     # # Detect if all graphs are being requested
     __graphtypes__ = []
-    if args_dict["graphtype"] == "all":
+    if args_dict.get("graphtype", "") == "all":
         __graphtypes__ = graphs
     else:
         __graphtypes__ = {args_dict["graphtype"]: graphs[args_dict["graphtype"]]}
@@ -331,7 +284,7 @@ def main():
         if file.startswith("@"):
             files = File2Strings(file[1:])
             if files is None:
-                raise Exception("Error reading {}".format(file))
+                raise Exception("Error reading %s", file)
             __files__ += list(files)
         else:
             __files__ += find_files([file], args.recurse)
@@ -341,7 +294,7 @@ def main():
     # # Is the save_dir actually a dirctory?
     args.save_dir = os.path.abspath(args.save_dir)
     if not os.path.isdir(args.save_dir):
-        log.critical("--out is not a directory: {}".format(args.save_dir))
+        log.critical("--out is not a directory: %s", args.save_dir)
         exit(1)
 
     # # Detect if all graphs are being requested

@@ -386,7 +386,7 @@ class bin_proxy(object):
         if self.lib == "lief":
             try:
                 self.bin = lief.parse(filepath=self.abs_fpath)
-                if type(self.bin) == lief.PE.Binary:
+                if type(self.bin) is lief.PE.Binary:
                     self.type = "PE"
                     log.debug("Parsed with lief as: {}".format(self.type))
                 else:
@@ -420,14 +420,9 @@ class bin_proxy(object):
             return self.bin.get_physical_by_rva(rva)
 
     def sections(self):
-
         index = 0
-        sections = []
-
         for lib_section in self.bin.sections:
-
             section = section_proxy(self.lib, lib_section)
-
             yield index, section
             index += 1
 
@@ -467,7 +462,7 @@ def get_chunk(fh, chunksize=8192):
 
 # # Some samples may have a corrupt section name (e.g. 206c0533ce9bf83ecdf904bec2f3532d)
 def safe_section_name(s_name, index):
-    if s_name == "" or s_name == None:
+    if s_name == "" or s_name is None:
         s_name = "sect_{:d}".format(index)
 
     # # Long sections names upset matplotlib
