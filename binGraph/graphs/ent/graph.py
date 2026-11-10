@@ -15,10 +15,7 @@ ibytes list of dicts:   Dicts are interesting bytes wanting to be displayed on t
                         colour = The colour of the line
 entcolour str           Colour of the entropy graph
 """
-from __future__ import division
-
 # # Import graph specific libs
-from __future__ import absolute_import
 import matplotlib
 
 matplotlib.use("Agg")
@@ -45,12 +42,7 @@ except ImportError as e1:
 
 
 # # Python 2/3 fix
-import json
-
-try:
-    from json.decoder import JSONDecodeError
-except ImportError:
-    JSONDecodeError = ValueError
+from json.decoder import JSONDecodeError
 
 import logging
 
@@ -95,7 +87,7 @@ def args_validation(args):
 
     # # Test to see what matplotlib backend is setup
     backend = matplotlib.get_backend()
-    if not backend == "TkAgg":
+    if getattr(args, "showplt", False) and backend != "TkAgg":
         log.warning(
             '{} matplotlib backend in use. This graph generation was tested with "TkAgg", bugs may lie ahead...'.format(backend)
         )
@@ -123,10 +115,10 @@ def args_validation(args):
 
             ibyte = {}
 
-            if not type(ib) == dict:
+            if not isinstance(ib, dict):
                 raise ArgValidationEx('Error validating --ibytes - value is not a dict: "{}"'.format(ibytes_list))
-            elif type(ib) == dict:
-                if not ("name" in list(ib.keys()) and "bytes" in list(ib.keys())):
+            else:
+                if not ("name" in ib and "bytes" in ib):
                     raise ArgValidationEx("Error validating --ibytes - name or bytes field not present: {}".format(ib))
 
                 ibyte["name"] = ib["name"]
@@ -136,20 +128,17 @@ def args_validation(args):
                     raise ArgValidationEx('Error validating --ibytes - Missing "bytes" values: {}'.format(ib))
 
                 for b in ib["bytes"]:
-                    if not type(b) == int:
+                    if not isinstance(b, int) or isinstance(b, bool):
                         raise ArgValidationEx('Error validating --ibytes is not an int: "{}"'.format(b))
                     else:
                         ibyte["bytes"].append(b)
 
                 # # Get/set the colour if it exists
-                if not "colour" in list(ib.keys()):
+                if "colour" not in ib:
                     log.warning("No colour defined for --ibytes byte range: {} {}".format(ib["name"], ib["bytes"]))
                     ibyte["colour"] = matplotlib.colors.to_rgba(hash_colour(ib["name"]))
                 else:
                     ibyte["colour"] = matplotlib.colors.to_rgba(ib["colour"])
-
-            else:
-                raise ArgValidationEx("Error validating --ibytes: {}".format(ib))
 
             ibytes_list.append(ibyte)
 
@@ -158,6 +147,9 @@ def args_validation(args):
 
 # # Generate the graph
 def generate(abs_fpath, fname, blob, chunks=__chunks__, ibytes=__ibytes_dict__, **kwargs):
+
+    ibytes = [{**item, "percentages": []} for item in ibytes] if ibytes else []
+    ib_indices = [np.array(item["bytes"], dtype=np.intp) for item in ibytes]
 
     with open(abs_fpath, "rb") as fh:
         log.debug('Opening: "{}"'.format(fname))
@@ -175,26 +167,24 @@ def generate(abs_fpath, fname, blob, chunks=__chunks__, ibytes=__ibytes_dict__, 
         log.debug("Using ibytes: {}".format(ibytes))
         log.debug("Producing shannon ent with chunksize {}".format(chunksize))
 
-        for index, _ in enumerate(ibytes):
-            ibytes[index]["percentages"] = []
-
         shannon_samples = []
+        inv_log256 = 1.0 / np.log(256.0)
         for chunk in get_chunk(fh, chunksize=chunksize):
+            chunk_len = len(chunk)
+            counts = np.bincount(np.frombuffer(chunk, dtype=np.uint8), minlength=256)
 
             # # Calculate ent
-            ent = shannon_ent(chunk)
+            nonzero = counts[counts > 0]
+            norm_counts = nonzero / chunk_len
+            ent = float(-(norm_counts * np.log(norm_counts) * inv_log256).sum())
             shannon_samples.append(ent)
 
             # # Calculate percentages of given bytes, if provided
             if ibytes:
-                cbytes = Counter(chunk)
-
-                for index, _ in enumerate(ibytes):
-                    occurrence = 0
-                    for b in ibytes[index]["bytes"]:
-                        occurrence += cbytes[b]
-
-                    ibytes[index]["percentages"].append((float(occurrence) / float(len(chunk))) * 100)
+                scale = 100.0 / chunk_len
+                for index, idx_arr in enumerate(ib_indices):
+                    occurrence = int(counts[idx_arr].sum())
+                    ibytes[index]["percentages"].append(occurrence * scale)
 
     log.debug('Closed: "{}"'.format(fname))
 
@@ -202,7 +192,7 @@ def generate(abs_fpath, fname, blob, chunks=__chunks__, ibytes=__ibytes_dict__, 
     fig, host = plt.subplots()
     parsedbin = ""
     log.debug("Plotting shannon samples")
-    host.plot(np.array(shannon_samples), label="Entropy", c=kwargs["entcolour"], zorder=1001, linewidth=1.2)
+    host.plot(np.array(shannon_samples), label="Entropy", c=kwargs.get("entcolour", __entcolour__), zorder=1001, linewidth=1.2)
 
     host.set_ylabel("Entropy\n".format(chunksize))
     host.set_xlabel("File offset")
@@ -239,95 +229,98 @@ def generate(abs_fpath, fname, blob, chunks=__chunks__, ibytes=__ibytes_dict__, 
     else:
 
         bp = bin_proxy(abs_fpath)
-
-        if None in (bp.bin, bp.type):
-            log.warning("Failed to parse binary format, parsing like --blob")
-
-        else:
-
-            if bp.type == "PE":
-
-                log.debug("Adding PE customisations")
-
-                # # Entrypoint (EP) pointer and vline
-                phy_ep_pointer = bp.get_physical_from_rva(bp.get_virtual_ep())
-                if phy_ep_pointer:
-                    phy_ep_pointer = phy_ep_pointer / nr_chunksize
-                    log.debug("{}: {}".format("Entrypoint", hex(bp.get_virtual_ep())))
-
-                    host.axvline(x=phy_ep_pointer, linestyle=":", c="#0000ff", zorder=zorder - 1)
-                    host.text(x=phy_ep_pointer, y=1.07, s="EntryPoint", color="b", rotation=45, va="bottom", ha="left")
-
-                end_of_last_section = 0
-                longest_section_name = 0
-
-                # # Section vlines
-                for index, section in bp.sections():
-                    zorder -= 1
-
-                    section_name = safe_section_name(section.name, index)
-                    section_offset = section.offset / nr_chunksize
-                    section_size = section.size / nr_chunksize
-
-                    log.debug("{}: {}".format(section_name, hex(section.offset)))
-
-                    host.axvline(x=section_offset, linestyle="--", zorder=zorder)
-                    host.text(x=section_offset, y=1.07, s=section_name, rotation=45, va="bottom", ha="left")
-
-                    # # Get end of last section
-                    if (section_offset + section_size) > end_of_last_section:
-                        end_of_last_section = section_offset + section_size
-
-                    # # Get longest section name
-                    longest_section_name = len(section_name) if len(section_name) > longest_section_name else longest_section_name
-
-                # # End of final section vline
-                host.axvline(x=end_of_last_section, linestyle="--", zorder=zorder)
-                host.text(x=end_of_last_section, y=1.07, s="Overlay", color="b", rotation=45, va="bottom", ha="left")
-
-                # # Eval the space required to show the section names
-                if longest_section_name <= 9:
-                    title_gap = "\n\n"
-                elif longest_section_name <= 15:
-                    title_gap = "\n\n\n"
-
-            elif bp.type == "ELF":
-
-                log.debug("Adding ELF customisations")
-
-                # # Entrypoint (EP) pointer and vline
-                phy_ep_pointer = parsedbin.virtual_address_to_offset(parsedbin.header.entrypoint) / nr_chunksize
-                log.debug("{}: {}".format("Entrypoint", hex(parsedbin.header.entrypoint)))
-
-                host.axvline(x=phy_ep_pointer, linestyle=":", c="r", zorder=zorder - 1)
-                host.text(x=phy_ep_pointer, y=1.07, s="Entry", rotation=45, va="bottom", ha="left")
-
-                longest_section_name = 0
-                # # Section vlines
-                for index, section in enumerate(parsedbin.sections):
-                    zorder -= 1
-
-                    section_name = safe_section_name(section.name, index)
-                    section_offset = section.offset / nr_chunksize
-
-                    log.debug("{}: {}".format(section_name, hex(section.offset)))
-
-                    host.axvline(x=section_offset, linestyle="--", zorder=zorder)
-                    host.text(x=section_offset, y=1.07, s=section_name, rotation=45, va="bottom", ha="left")
-
-                    # # Get longest section name
-                    longest_section_name = len(section_name) if len(section_name) > longest_section_name else longest_section_name
-
-                # # Eval the space required to show the section names
-                if longest_section_name <= 5:
-                    title_gap = "\n" * 2
-                elif longest_section_name <= 9:
-                    title_gap = "\n" * 3
-                elif longest_section_name <= 15:
-                    title_gap = "\n" * 4
+        try:
+            if None in (bp.bin, bp.type):
+                log.warning("Failed to parse binary format, parsing like --blob")
 
             else:
-                log.debug("File is a currently unsupported format - (supported by lief, not yet supported by binGraph)")
+
+                if bp.type == "PE":
+
+                    log.debug("Adding PE customisations")
+
+                    # # Entrypoint (EP) pointer and vline
+                    phy_ep_pointer = bp.get_physical_from_rva(bp.get_virtual_ep())
+                    if phy_ep_pointer:
+                        phy_ep_pointer = phy_ep_pointer / nr_chunksize
+                        log.debug("{}: {}".format("Entrypoint", hex(bp.get_virtual_ep())))
+
+                        host.axvline(x=phy_ep_pointer, linestyle=":", c="#0000ff", zorder=zorder - 1)
+                        host.text(x=phy_ep_pointer, y=1.07, s="EntryPoint", color="b", rotation=45, va="bottom", ha="left")
+
+                    end_of_last_section = 0
+                    longest_section_name = 0
+
+                    # # Section vlines
+                    for index, section in bp.sections():
+                        zorder -= 1
+
+                        section_name = safe_section_name(section.name, index)
+                        section_offset = section.offset / nr_chunksize
+                        section_size = section.size / nr_chunksize
+
+                        log.debug("{}: {}".format(section_name, hex(section.offset)))
+
+                        host.axvline(x=section_offset, linestyle="--", zorder=zorder)
+                        host.text(x=section_offset, y=1.07, s=section_name, rotation=45, va="bottom", ha="left")
+
+                        # # Get end of last section
+                        if (section_offset + section_size) > end_of_last_section:
+                            end_of_last_section = section_offset + section_size
+
+                        # # Get longest section name
+                        longest_section_name = len(section_name) if len(section_name) > longest_section_name else longest_section_name
+
+                    # # End of final section vline
+                    host.axvline(x=end_of_last_section, linestyle="--", zorder=zorder)
+                    host.text(x=end_of_last_section, y=1.07, s="Overlay", color="b", rotation=45, va="bottom", ha="left")
+
+                    # # Eval the space required to show the section names
+                    if longest_section_name <= 9:
+                        title_gap = "\n\n"
+                    elif longest_section_name <= 15:
+                        title_gap = "\n\n\n"
+
+                elif bp.type == "ELF":
+
+                    log.debug("Adding ELF customisations")
+                    parsedbin = bp.bin
+
+                    # # Entrypoint (EP) pointer and vline
+                    phy_ep_pointer = parsedbin.virtual_address_to_offset(parsedbin.header.entrypoint) / nr_chunksize
+                    log.debug("{}: {}".format("Entrypoint", hex(parsedbin.header.entrypoint)))
+
+                    host.axvline(x=phy_ep_pointer, linestyle=":", c="r", zorder=zorder - 1)
+                    host.text(x=phy_ep_pointer, y=1.07, s="Entry", rotation=45, va="bottom", ha="left")
+
+                    longest_section_name = 0
+                    # # Section vlines
+                    for index, section in enumerate(parsedbin.sections):
+                        zorder -= 1
+
+                        section_name = safe_section_name(section.name, index)
+                        section_offset = section.offset / nr_chunksize
+
+                        log.debug("{}: {}".format(section_name, hex(section.offset)))
+
+                        host.axvline(x=section_offset, linestyle="--", zorder=zorder)
+                        host.text(x=section_offset, y=1.07, s=section_name, rotation=45, va="bottom", ha="left")
+
+                        # # Get longest section name
+                        longest_section_name = len(section_name) if len(section_name) > longest_section_name else longest_section_name
+
+                    # # Eval the space required to show the section names
+                    if longest_section_name <= 5:
+                        title_gap = "\n" * 2
+                    elif longest_section_name <= 9:
+                        title_gap = "\n" * 3
+                    elif longest_section_name <= 15:
+                        title_gap = "\n" * 4
+
+                else:
+                    log.debug("File is a currently unsupported format - (supported by lief, not yet supported by binGraph)")
+        finally:
+            bp.close()
 
     # # Plot the entropy graph
     host.set_xbound(lower=-0.5, upper=len(shannon_samples) + 0.5)
@@ -346,7 +339,10 @@ def generate(abs_fpath, fname, blob, chunks=__chunks__, ibytes=__ibytes_dict__, 
     # # Return the plt, kwargs for the plt.savefig function, and additional information for json data
     json_data = {
         "title": fname,
-        "info": {"Mean": statistics.mean(shannon_samples), "Standard deviation": statistics.stdev(shannon_samples)},
+        "info": {
+            "Mean": statistics.mean(shannon_samples) if shannon_samples else 0.0,
+            "Standard deviation": statistics.stdev(shannon_samples) if len(shannon_samples) > 1 else 0.0,
+        },
     }
 
     return plt, {"bbox_inches": "tight", "bbox_extra_artists": tuple(legends)}, json_data
@@ -355,12 +351,13 @@ def generate(abs_fpath, fname, blob, chunks=__chunks__, ibytes=__ibytes_dict__, 
 # ### Helper functions
 
 # # Abstracts the bin properties away from specific library calls enabling lief and pefile usage
-class bin_proxy(object):
+class bin_proxy:
     """Abstract for different binary parsers types in use"""
 
     def __init__(self, abs_fpath, lib=None):
-        super(bin_proxy, self).__init__()
+        super().__init__()
         self.abs_fpath = abs_fpath
+        self.bin, self.type = None, None
 
         if lib:
             self.lib = lib
@@ -372,9 +369,9 @@ class bin_proxy(object):
                 self.lib = "lief"
             else:
                 # # We dont have a parser
-                return None, None
+                self.lib = None
+                return
 
-        self.bin, self.type = None, None
         self.__parse_bin()
 
     class __ParseError(Exception):
@@ -386,24 +383,34 @@ class bin_proxy(object):
         if self.lib == "lief":
             try:
                 self.bin = lief.parse(filepath=self.abs_fpath)
-                if type(self.bin) is lief.PE.Binary:
+                if isinstance(self.bin, lief.PE.Binary):
                     self.type = "PE"
+                    log.debug("Parsed with lief as: {}".format(self.type))
+                elif hasattr(lief, "ELF") and isinstance(self.bin, lief.ELF.Binary):
+                    self.type = "ELF"
                     log.debug("Parsed with lief as: {}".format(self.type))
                 else:
                     log.debug("File is a currently unsupported format: {}".format(self.type))
 
-            except lief.bad_file as e:
+            except Exception as e:
                 log.warning("Failed to parse with lief: {}".format(e))
 
         elif self.lib == "pefile":
             try:
-                self.bin = pefile.PE(self.abs_fpath)
+                self.bin = pefile.PE(self.abs_fpath, fast_load=True)
                 self.type = "PE"
 
                 log.debug("Parsed with pefile as: {}".format(self.type))
 
             except pefile.PEFormatError as e:
                 log.warning("Failed to parse with pefile: {}".format(e))
+
+    def close(self):
+        if self.lib == "pefile" and self.bin is not None:
+            try:
+                self.bin.close()
+            except Exception:
+                pass
 
     def get_virtual_ep(self):
 
@@ -428,19 +435,20 @@ class bin_proxy(object):
 
 
 # # Part of bin_proxy - abstracts section calls
-class section_proxy(object):
+class section_proxy:
     """Abstract for different binary parsers types in use"""
 
     def __init__(self, lib, lib_section):
-        super(section_proxy, self).__init__()
+        super().__init__()
         self.lib = lib
         self.lib_section = lib_section
 
         if self.lib == "lief":
             self.name = lib_section.name
             self.offset = lib_section.offset
+            self.size = lib_section.size
         elif self.lib == "pefile":
-            self.name = str(lib_section.Name.rstrip(b"\x00").decode("utf-8"))
+            self.name = lib_section.Name.rstrip(b"\x00").decode("utf-8", errors="replace")
             self.offset = self.lib_section.PointerToRawData
             self.size = self.lib_section.SizeOfRawData
 
@@ -451,11 +459,8 @@ def get_chunk(fh, chunksize=8192):
         chunk = fh.read(chunksize)
 
         # # Convert to bytearray if not python 3
-        if sys.version_info[0] <= 3:
-            chunk = bytearray(chunk)
-
         if chunk:
-            yield list(chunk)
+            yield chunk
         else:
             break
 
@@ -476,21 +481,24 @@ def safe_section_name(s_name, index):
 def hash_colour(text):
 
     name_colour = int("F" + hashlib.md5(text.encode("utf-8")).hexdigest()[:4], base=16)
-    np.random.seed(int(name_colour))
-    return matplotlib.colors.to_rgba(
-        np.random.rand(
-            3,
-        )
-    )
+    rng = np.random.default_rng(name_colour)
+    return matplotlib.colors.to_rgba(rng.random(3))
 
 
 # # Calculate entropy given a list
 def shannon_ent(labels, base=256):
-    value, counts = np.unique(labels, return_counts=True)
-    norm_counts = counts / counts.sum()
-    e = 0
+    if isinstance(labels, (bytes, bytearray, memoryview)):
+        counts = np.bincount(np.frombuffer(labels, dtype=np.uint8), minlength=256)
+        counts = counts[counts > 0]
+    else:
+        _, counts = np.unique(labels, return_counts=True)
+    total = counts.sum()
+    if total == 0:
+        return 0.0
+    norm_counts = counts / total
+    e = np.e
     base = e if base is None else base
-    return -(norm_counts * np.log(norm_counts) / np.log(base)).sum()
+    return float(-(norm_counts * np.log(norm_counts) / np.log(base)).sum())
 
 
 if __name__ == "__main__":

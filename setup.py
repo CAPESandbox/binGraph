@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='binGraph',
-    version='3.3.2',
+    version='3.4.0',
     description='CAPE\'s version of binGraph',
     license='GNU Affero General Public License v3.0',
     packages=find_packages(),
@@ -15,16 +15,16 @@ setup(
         "Intended Audience :: Science/Research",
         "Natural Language :: English",
         "Operating System :: POSIX :: Linux",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Topic :: Security",
     ],
     entry_points={
         'console_scripts': [
-            'binGraph = binGraph:__main__.main',
+            'binGraph = binGraph.__main__:main',
         ],
     },
     install_requires=[
