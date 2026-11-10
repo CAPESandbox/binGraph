@@ -12,19 +12,16 @@ g_log bool:     Whether to apply a log scale to occurance axis
 no_order bool:  Remove the ordered histogram - it shows overall distribution
 """
 
-from __future__ import division
-
-from __future__ import absolute_import
 import os
 import sys
 import numpy as np
 import matplotlib
 
 matplotlib.use("Agg")
+from matplotlib.figure import Figure
 import matplotlib.ticker as ticker
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
-from collections import Counter
 
 import logging
 
@@ -48,7 +45,7 @@ def args_setup(arg_parser):
     )
     arg_parser.add_argument("--width", type=int, default=__width__, metavar=__width__, help="Sample width")
     arg_parser.add_argument(
-        "--no_log", action="store_false", default=__g_log__, help="Do _not_ apply a log scale to occurance axis"
+        "--no_log", dest="g_log", action="store_false", default=__g_log__, help="Do _not_ apply a log scale to occurance axis"
     )
     arg_parser.add_argument(
         "--no_order",
@@ -75,7 +72,7 @@ def args_validation(args):
 
     # # Test to see what matplotlib backend is setup
     backend = matplotlib.get_backend()
-    if not backend == "TkAgg":
+    if getattr(args, "showplt", False) and backend != "TkAgg":
         log.warning(
             '{} matplotlib backend in use. This graph generation was tested with "TkAgg", bugs may lie ahead...'.format(backend)
         )
@@ -84,9 +81,11 @@ def args_validation(args):
     if args.graphtype == "all":
         args.no_zero = __no_zero__
         args.width = __width__
-        args.no_log = __g_log__
+        args.g_log = __g_log__
         args.no_order = __no_order__
-        args.colours = __colours__
+        args.colours = list(__colours__)
+    else:
+        args.colours = list(args.colours)
 
     try:
         args.colours[0] = matplotlib.colors.to_rgba(args.colours[0])
@@ -98,28 +97,27 @@ def args_validation(args):
 def generate(
     abs_fpath, fname, no_zero=__no_zero__, width=__width__, g_log=__g_log__, no_order=__no_order__, colours=__colours__, **kwargs
 ):
-
-    file_array = []
-    with open(abs_fpath, "rb") as fh:
-        for x in bytearray(fh.read()):
-            file_array.append(x)
+    file_array = np.fromfile(abs_fpath, dtype=np.uint8)
 
     log.debug('Read: "{}", length: {}'.format(fname, len(file_array)))
 
     log.debug("Ignore 0's: {}".format(no_zero))
-    no_zero = -int(no_zero)
+    start_byte = 1 if no_zero else 0
 
-    fig, ax = plt.subplots()
+    if kwargs.get("showplt", False):
+        fig, ax = plt.subplots()
+    else:
+        fig = Figure()
+        ax = fig.subplots()
 
     # # Add a byte hist ordered 1 > 255
-    ordered_row = []
-    c = Counter(file_array)
-    for x in range(no_zero, 256):
-        ordered_row.append(c[x])
+    counts = np.bincount(file_array, minlength=256)
+    x_range = np.arange(start_byte, 256)
+    ordered_row = counts[start_byte:256]
 
     ax.bar(
-        np.array(list(range(no_zero, 256))),
-        np.array(ordered_row),
+        x_range,
+        ordered_row,
         align="edge",
         width=width,
         label="Bytes",
@@ -132,17 +130,11 @@ def generate(
 
     # # Add a byte hist ordered by occurrence - shows general distribution
     if not no_order:
-        sorted_row = []
-        c = Counter(file_array)
-        for x in range(no_zero, 256):
-            sorted_row.append(c[x])
-
-        sorted_row.sort()
-        sorted_row.reverse()
+        sorted_row = np.sort(ordered_row)[::-1]
 
         ax.bar(
-            np.array(list(range(no_zero, 256))),
-            np.array(sorted_row),
+            x_range,
+            sorted_row,
             width=width,
             label="Ordered",
             color=colours[1],
@@ -158,7 +150,7 @@ def generate(
     ax.xaxis.set_major_locator(MaxNLocator(20))
     ax.set_xlabel(
         "Bytes (0x00 included: {}, {})".format(
-            (True if no_zero == 0 else False), ("width 1" if width == 1 else "width: " + str(width))
+            (True if start_byte == 0 else False), ("width 1" if width == 1 else "width: " + str(width))
         )
     )
     ax.set_ylabel("Occurrence (log {})".format(g_log))
@@ -173,16 +165,17 @@ def generate(
         ax.set_xbound(lower=0, upper=255)
         log.debug("Setting xlim/xbounds to (0,255)")
 
-    plt.legend(loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.07), framealpha=1)
+    ax.legend(loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.07), framealpha=1)
 
-    plt.title("Byte histogram: {}\n".format(fname))
+    graphtitle = kwargs.get("graphtitle")
+    ax.set_title("{}\n".format(graphtitle) if graphtitle else "Byte histogram: {}\n".format(fname))
 
-    return plt, {}, {}
+    return fig, {}, {"title": graphtitle or fname}
 
 
 if __name__ == "__main__":
 
-    import argparse, sys
+    import argparse
 
     logging.basicConfig(stream=sys.stderr, format="%(levelname)s | %(message)s", level=logging.DEBUG)
     logging.getLogger("matplotlib").setLevel(logging.CRITICAL)
@@ -238,16 +231,20 @@ if __name__ == "__main__":
     args_dict["fname"] = os.path.basename(args.file)
     args_dict["abs_save_fpath"] = "{}.{}".format(os.path.basename(args_dict["abs_fpath"]), args.format)
 
-    plt, save_kwargs, json_data = generate(**args_dict)
+    fig = None
+    try:
+        fig, save_kwargs, json_data = generate(**args_dict)
+        fig.set_size_inches(*args.figsize, forward=True)
+        fig.tight_layout()
 
-    fig = plt.gcf()
-    fig.set_size_inches(*args.figsize, forward=True)
-
-    plt.tight_layout()
-
-    if args.showplt:
-        log.debug("Opening graph interactively")
-        plt.show()
-    else:
-        plt.savefig(args_dict["abs_save_fpath"], format=args.format, dpi=args.dpi, **save_kwargs)
-        log.info('Graph saved to: "{}"'.format(args_dict["abs_save_fpath"]))
+        if args.showplt:
+            log.debug("Opening graph interactively")
+            plt.show()
+        else:
+            fig.savefig(args_dict["abs_save_fpath"], format=args.format, dpi=args.dpi, **save_kwargs)
+            log.info('Graph saved to: "{}"'.format(args_dict["abs_save_fpath"]))
+    finally:
+        if fig is not None:
+            fig.clear()
+            if args.showplt:
+                plt.close(fig)

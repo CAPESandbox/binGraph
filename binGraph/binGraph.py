@@ -33,17 +33,19 @@ log.setLevel(logging.INFO)
 
 # ### Helper functions
 CWD = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, CWD)
+if not __package__ and CWD not in sys.path:
+    sys.path.insert(0, CWD)
 
 
 def File2Strings(filename):
     if not os.path.exists(filename) or not os.path.isfile(filename):
         return None
     try:
-        with open(filename, "r") as f:
-            return [line.rstrip("\n") for line in f.readlines()]
+        with open(filename, "r", encoding="utf-8") as f:
+            return [line.rstrip("\n") for line in f]
     except Exception as e:
         log.error("Bingraph load file error: %s", str(e))
+        return None
 
 # # Gather files to process - give it a list of paths (files or directories)
 # # and it will return all files in a list
@@ -56,24 +58,23 @@ def find_files(search_paths, recurse):
                 log.debug("Found directory: %s", dir_name)
                 for fname in files:
                     abs_fpath = os.path.join(dir_name, fname)
-                    if os.path.isfile(abs_fpath) and not os.path.islink(abs_fpath) and not os.stat(abs_fpath).st_size == 0:
+                    if os.path.isfile(abs_fpath) and not os.path.islink(abs_fpath) and os.path.getsize(abs_fpath) > 0:
                         log.info('File found: "%s"', abs_fpath)
                         __files__.append(abs_fpath)
-        elif os.path.isfile(f) and not os.path.islink(f) and not os.stat(f).st_size == 0:
+        elif os.path.isfile(f) and not os.path.islink(f) and os.path.getsize(f) > 0:
             abs_fpath = os.path.abspath(f)
             log.debug('Found file: "%s"', abs_fpath)
             __files__.append(abs_fpath)
 
         else:
             log.critical('Not a file, skipping: "%s"', f)
-            pass
 
     return __files__
 
 
 # # Cleanup given filename
 def clean_fname(fn):
-    return "".join([c for c in fn if c.isalnum()])
+    return "".join(c for c in fn if c.isalnum())
 
 
 # # Generate the different file names required
@@ -103,7 +104,10 @@ def gen_names(ffrmt, abs_fpath, abs_save_path, save_prefix=None, graphtype=None,
 try:
     graphs = {}
     for graph_name in ("ent", "hist"):
-        graphs[graph_name] = importlib.import_module(f"graphs.{graph_name}.graph")
+        try:
+            graphs[graph_name] = importlib.import_module(f".graphs.{graph_name}.graph", package=__package__ or "binGraph")
+        except ImportError:
+            graphs[graph_name] = importlib.import_module(f"graphs.{graph_name}.graph")
 
 except Exception as e:
     log.critical("Failed to import graph: {}".format(e))
@@ -142,15 +146,16 @@ def generate_graphs(args_dict):
 
     # # Set logging
     if args_dict.get("verbose", False):
-        logging.getLogger().setLevel(logging.DEBUG)
+        log.setLevel(logging.DEBUG)
         logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
     # # Detect if all graphs are being requested
-    __graphtypes__ = []
+    __graphtypes__ = {}
     if args_dict.get("graphtype", "") == "all":
         __graphtypes__ = graphs
     else:
-        __graphtypes__ = {args_dict["graphtype"]: graphs[args_dict["graphtype"]]}
+        graphtype = args_dict.get("graphtype", "ent")
+        __graphtypes__ = {graphtype: graphs[graphtype]}
 
     log.debug("Generating graphs: {}".format(", ".join(list(__graphtypes__.keys()))))
 
@@ -160,55 +165,71 @@ def generate_graphs(args_dict):
 
         for module_name, module in __graphtypes__.items():
             abs_save_fpath, fname, cleaned_fname = gen_names(
-                args_dict["format"],
+                args_dict.get("format", __figformat__),
                 abs_fpath,
-                args_dict["save_dir"],
-                save_prefix=args_dict["prefix"],
+                args_dict.get("save_dir", os.getcwd()),
+                save_prefix=args_dict.get("prefix"),
                 graphtype=module_name,
                 findex=(index if len(args_dict["files"]) > 1 else None),
             )
-            args_dict["abs_fpath"] = abs_fpath  # Define the current file we are acting on
-            args_dict["fname"] = fname
-            args_dict["cleaned_fname"] = cleaned_fname
+            run_args = dict(args_dict)
+            run_args["abs_fpath"] = abs_fpath  # Define the current file we are acting on
+            run_args["fname"] = fname
+            run_args["cleaned_fname"] = cleaned_fname
 
             # # Generate and output the graph
-            plt, save_kwargs, json_data = module.generate(**args_dict)
-            fig = plt.gcf()
-            fig.set_size_inches(*args_dict["figsize"], forward=True)
+            fig = None
+            try:
+                fig, save_kwargs, json_data = module.generate(**run_args)
+                fig.set_size_inches(*run_args.get("figsize", __figsize__), forward=True)
 
-            plt.tight_layout()
+                fig.tight_layout()
 
-            if args_dict["showplt"]:
-                log.info("Opening graph interactively")
-                plt.show()
+                if run_args.get("showplt", __showplt__):
+                    import matplotlib.pyplot as plt
 
-            elif args_dict["json"]:
-                log.info("Saving as json file")
+                    log.info("Opening graph interactively")
+                    plt.show()
 
-                output = {}
-                output["info"] = json_data
+                elif run_args.get("json", __json__):
+                    log.info("Saving as json file")
 
-                buf = io.BytesIO()
-                plt.savefig(buf, format=args_dict["format"], dpi=args_dict["dpi"], **save_kwargs)
-                output["graph"] = base64.b64encode(buf.getvalue()).decode()
-                buf.close()
+                    output = {}
+                    output["info"] = json_data
 
-                output["cmdline"] = " ".join(args_dict)
-                output["version"] = __version__
+                    with io.BytesIO() as buf:
+                        fig.savefig(
+                            buf,
+                            format=run_args.get("format", __figformat__),
+                            dpi=run_args.get("dpi", __figdpi__),
+                            **save_kwargs,
+                        )
+                        output["graph"] = base64.b64encode(buf.getvalue()).decode()
 
-                abs_save_fpath = os.path.splitext(abs_save_fpath)[0] + ".json"
-                with open(abs_save_fpath, "w") as outfile:
-                    json.dump(output, outfile)
+                    output["cmdline"] = " ".join(sys.argv) if sys.argv else " ".join(run_args)
+                    output["version"] = __version__
 
-                log.info('Graph saved to: "{}"'.format(abs_save_fpath))
+                    abs_save_fpath = os.path.splitext(abs_save_fpath)[0] + ".json"
+                    with open(abs_save_fpath, "w", encoding="utf-8") as outfile:
+                        json.dump(output, outfile)
 
-            else:
-                plt.savefig(abs_save_fpath, format=args_dict["format"], dpi=args_dict["dpi"], **save_kwargs)
-                log.info('Graph saved to: "{}"'.format(abs_save_fpath))
+                    log.info('Graph saved to: "{}"'.format(abs_save_fpath))
 
-            plt.clf()
-            plt.cla()
-            plt.close()
+                else:
+                    fig.savefig(
+                        abs_save_fpath,
+                        format=run_args.get("format", __figformat__),
+                        dpi=run_args.get("dpi", __figdpi__),
+                        **save_kwargs,
+                    )
+                    log.info('Graph saved to: "{}"'.format(abs_save_fpath))
+            finally:
+                if fig is not None:
+                    fig.clear()
+                    if run_args.get("showplt", __showplt__):
+                        import matplotlib.pyplot as plt
+
+                        plt.close(fig)
 
 def main():
 
@@ -284,7 +305,7 @@ def main():
         if file.startswith("@"):
             files = File2Strings(file[1:])
             if files is None:
-                raise Exception("Error reading %s", file)
+                raise RuntimeError(f"Error reading {file}")
             __files__ += list(files)
         else:
             __files__ += find_files([file], args.recurse)
@@ -295,7 +316,7 @@ def main():
     args.save_dir = os.path.abspath(args.save_dir)
     if not os.path.isdir(args.save_dir):
         log.critical("--out is not a directory: %s", args.save_dir)
-        exit(1)
+        sys.exit(1)
 
     # # Detect if all graphs are being requested
     __graphtypes__ = []

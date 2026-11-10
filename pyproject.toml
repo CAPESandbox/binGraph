@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "binGraph"
+version = "3.4.0"
+description = "CAPE's version of binGraph"
+readme = "README.md"
+license = { text = "GNU Affero General Public License v3.0" }
+requires-python = ">=3.10"
+authors = [
+    { name = "geekscrapy", email = "noreply@github.com" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+]
+dependencies = [
+    "matplotlib>=3.3.0",
+    "numpy>=1.19.1",
+    "pefile>=2021.9.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/CAPESandbox/binGraph"
+
+[project.scripts]
+binGraph = "binGraph.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["binGraph*"]
