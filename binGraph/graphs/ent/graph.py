@@ -19,6 +19,7 @@ entcolour str           Colour of the entropy graph
 import matplotlib
 
 matplotlib.use("Agg")
+from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from matplotlib.ticker import MaxNLocator
@@ -26,19 +27,20 @@ from matplotlib.ticker import MaxNLocator
 import hashlib
 import numpy as np
 import statistics
-from collections import Counter
 import os
 import json
+import struct
 import sys
-import re
 
 try:
     import pefile
-except ImportError as e1:
-    try:
-        import lief
-    except ImportError as e2:
-        pass
+except ImportError:
+    pefile = None
+
+try:
+    import lief
+except ImportError:
+    lief = None
 
 
 # # Python 2/3 fix
@@ -98,12 +100,15 @@ def args_validation(args):
         args.ibytes = __ibytes__
         args.entcolour = __entcolour__
 
-    # # Test ibytes is jalid json
+    if args.chunks <= 0:
+        raise ArgValidationEx('Error validating --chunks - value must be > 0: "{}"'.format(args.chunks))
+
+    # # Test ibytes is valid json
     try:
         args.ibytes = json.loads(args.ibytes)
     except JSONDecodeError as e:
         raise ArgValidationEx('Error decoding json --ibytes value. {}: "{}"'.format(e, args.ibytes))
-    except TypeError as e:
+    except TypeError:
         args.ibytes = False
 
     # # Test to see if ibytes are sane
@@ -116,7 +121,7 @@ def args_validation(args):
             ibyte = {}
 
             if not isinstance(ib, dict):
-                raise ArgValidationEx('Error validating --ibytes - value is not a dict: "{}"'.format(ibytes_list))
+                raise ArgValidationEx('Error validating --ibytes - value is not a dict: "{}"'.format(ib))
             else:
                 if not ("name" in ib and "bytes" in ib):
                     raise ArgValidationEx("Error validating --ibytes - name or bytes field not present: {}".format(ib))
@@ -128,8 +133,8 @@ def args_validation(args):
                     raise ArgValidationEx('Error validating --ibytes - Missing "bytes" values: {}'.format(ib))
 
                 for b in ib["bytes"]:
-                    if not isinstance(b, int) or isinstance(b, bool):
-                        raise ArgValidationEx('Error validating --ibytes is not an int: "{}"'.format(b))
+                    if not isinstance(b, int) or isinstance(b, bool) or not (0 <= b <= 255):
+                        raise ArgValidationEx('Error validating --ibytes is not a valid byte int (0-255): "{}"'.format(b))
                     else:
                         ibyte["bytes"].append(b)
 
@@ -146,59 +151,64 @@ def args_validation(args):
 
 
 # # Generate the graph
-def generate(abs_fpath, fname, blob, chunks=__chunks__, ibytes=__ibytes_dict__, **kwargs):
+def generate(abs_fpath, fname, blob=False, chunks=__chunks__, ibytes=__ibytes_dict__, **kwargs):
 
     ibytes = [{**item, "percentages": []} for item in ibytes] if ibytes else []
     ib_indices = [np.array(item["bytes"], dtype=np.intp) for item in ibytes]
 
-    with open(abs_fpath, "rb") as fh:
-        log.debug('Opening: "{}"'.format(fname))
+    log.debug('Opening: "{}"'.format(fname))
+    file_array = np.fromfile(abs_fpath, dtype=np.uint8)
+    fs = int(file_array.size)
 
-        # # Calculate the overall chunksize
-        fs = os.fstat(fh.fileno()).st_size
-        if chunks > fs:
-            chunksize = 1
-            nr_chunksize = 1
-        else:
-            chunksize = -(-fs // chunks)
-            nr_chunksize = fs / chunks
+    if chunks <= 0 or chunks > fs:
+        chunksize = 1
+        nr_chunksize = 1
+    else:
+        chunksize = -(-fs // chunks)
+        nr_chunksize = fs / chunks
 
-        log.debug("Filesize: {}, Chunksize (rounded): {}, Chunksize: {}, Chunks: {}".format(fs, chunksize, nr_chunksize, chunks))
-        log.debug("Using ibytes: {}".format(ibytes))
-        log.debug("Producing shannon ent with chunksize {}".format(chunksize))
+    log.debug("Filesize: {}, Chunksize (rounded): {}, Chunksize: {}, Chunks: {}".format(fs, chunksize, nr_chunksize, chunks))
+    log.debug("Using ibytes: {}".format(ibytes))
+    log.debug("Producing shannon ent with chunksize {}".format(chunksize))
 
+    if fs > 0:
+        n_chunks = -(-fs // chunksize)
+        counts_2d = np.empty((n_chunks, 256), dtype=np.int64)
+        chunk_lens = np.empty(n_chunks, dtype=np.float64)
+        for idx, offset in enumerate(range(0, fs, chunksize)):
+            chunk = file_array[offset : offset + chunksize]
+            counts_2d[idx] = np.bincount(chunk, minlength=256)
+            chunk_lens[idx] = chunk.size
+
+        probs = counts_2d / chunk_lens[:, None]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_probs = np.where(counts_2d > 0, np.log(probs), 0.0)
+        shannon_samples = (-(probs * log_probs).sum(axis=1) / np.log(256.0)).tolist()
+
+        if ibytes:
+            scales = 100.0 / chunk_lens
+            for index, idx_arr in enumerate(ib_indices):
+                ibytes[index]["percentages"] = (counts_2d[:, idx_arr].sum(axis=1) * scales).tolist()
+    else:
         shannon_samples = []
-        inv_log256 = 1.0 / np.log(256.0)
-        for chunk in get_chunk(fh, chunksize=chunksize):
-            chunk_len = len(chunk)
-            counts = np.bincount(np.frombuffer(chunk, dtype=np.uint8), minlength=256)
-
-            # # Calculate ent
-            nonzero = counts[counts > 0]
-            norm_counts = nonzero / chunk_len
-            ent = float(-(norm_counts * np.log(norm_counts) * inv_log256).sum())
-            shannon_samples.append(ent)
-
-            # # Calculate percentages of given bytes, if provided
-            if ibytes:
-                scale = 100.0 / chunk_len
-                for index, idx_arr in enumerate(ib_indices):
-                    occurrence = int(counts[idx_arr].sum())
-                    ibytes[index]["percentages"].append(occurrence * scale)
 
     log.debug('Closed: "{}"'.format(fname))
 
     # # Create the figure
-    fig, host = plt.subplots()
+    if kwargs.get("showplt", False):
+        fig, host = plt.subplots()
+    else:
+        fig = Figure()
+        host = fig.subplots()
     parsedbin = ""
     log.debug("Plotting shannon samples")
     host.plot(np.array(shannon_samples), label="Entropy", c=kwargs.get("entcolour", __entcolour__), zorder=1001, linewidth=1.2)
 
-    host.set_ylabel("Entropy\n".format(chunksize))
+    host.set_ylabel("Entropy\n")
     host.set_xlabel("File offset")
     host.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos: ("0x{:02X}".format(int(x * chunksize)))))
     host.xaxis.set_major_locator(MaxNLocator(10))
-    plt.xticks(rotation=-10, ha="left")
+    plt.setp(host.get_xticklabels(), rotation=-10, ha="left")
 
     # # Draw the graphs in order
     zorder = 1000
@@ -287,11 +297,13 @@ def generate(abs_fpath, fname, blob, chunks=__chunks__, ibytes=__ibytes_dict__, 
                     parsedbin = bp.bin
 
                     # # Entrypoint (EP) pointer and vline
-                    phy_ep_pointer = parsedbin.virtual_address_to_offset(parsedbin.header.entrypoint) / nr_chunksize
-                    log.debug("{}: {}".format("Entrypoint", hex(parsedbin.header.entrypoint)))
+                    raw_ep_offset = parsedbin.virtual_address_to_offset(parsedbin.header.entrypoint)
+                    if isinstance(raw_ep_offset, int) and raw_ep_offset > 0:
+                        phy_ep_pointer = raw_ep_offset / nr_chunksize
+                        log.debug("{}: {}".format("Entrypoint", hex(parsedbin.header.entrypoint)))
 
-                    host.axvline(x=phy_ep_pointer, linestyle=":", c="r", zorder=zorder - 1)
-                    host.text(x=phy_ep_pointer, y=1.07, s="Entry", rotation=45, va="bottom", ha="left")
+                        host.axvline(x=phy_ep_pointer, linestyle=":", c="r", zorder=zorder - 1)
+                        host.text(x=phy_ep_pointer, y=1.07, s="Entry", rotation=45, va="bottom", ha="left")
 
                     longest_section_name = 0
                     # # Section vlines
@@ -334,21 +346,118 @@ def generate(abs_fpath, fname, blob, chunks=__chunks__, ibytes=__ibytes_dict__, 
     else:
         legends.append(host.legend(loc="upper left", bbox_to_anchor=(1.01, 1), frameon=False))
 
-    host.set_title("{title_gap}".format(title_gap=title_gap))
+    graphtitle = kwargs.get("graphtitle")
+    host.set_title("{}{}".format(graphtitle, title_gap) if graphtitle else "{title_gap}".format(title_gap=title_gap))
 
-    # # Return the plt, kwargs for the plt.savefig function, and additional information for json data
+    # # Return the fig, kwargs for the fig.savefig function, and additional information for json data
     json_data = {
-        "title": fname,
+        "title": graphtitle or fname,
         "info": {
             "Mean": statistics.mean(shannon_samples) if shannon_samples else 0.0,
             "Standard deviation": statistics.stdev(shannon_samples) if len(shannon_samples) > 1 else 0.0,
         },
     }
 
-    return plt, {"bbox_inches": "tight", "bbox_extra_artists": tuple(legends)}, json_data
+    return fig, {"bbox_inches": "tight", "bbox_extra_artists": tuple(legends)}, json_data
 
 
 # ### Helper functions
+
+
+class _ElfSection:
+    __slots__ = ("name", "offset", "size")
+
+    def __init__(self, name, offset, size):
+        self.name = name
+        self.offset = offset
+        self.size = size
+
+
+class _ElfHeader:
+    __slots__ = ("entrypoint",)
+
+    def __init__(self, entrypoint):
+        self.entrypoint = entrypoint
+
+
+class _SimpleELF:
+    """Lightweight built-in 32/64-bit ELF header and section parser."""
+
+    def __init__(self, filepath):
+        with open(filepath, "rb") as f:
+            data = f.read()
+        if len(data) < 52 or data[:4] != b"\x7fELF":
+            raise ValueError("Not a valid ELF file")
+        ei_class = data[4]
+        ei_data = data[5]
+        endian = "<" if ei_data == 1 else ">" if ei_data == 2 else None
+        if endian is None or ei_class not in (1, 2):
+            raise ValueError("Unsupported ELF class or endianness")
+
+        if ei_class == 1:
+            e_entry, e_phoff, e_shoff, _, _, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx = struct.unpack_from(
+                endian + "IIIIHHHHHH", data, 24
+            )
+        else:
+            if len(data) < 64:
+                raise ValueError("Truncated 64-bit ELF header")
+            e_entry, e_phoff, e_shoff, _, _, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx = struct.unpack_from(
+                endian + "QQQIHHHHHH", data, 24
+            )
+
+        self.header = _ElfHeader(e_entry)
+        self._segments = []
+        if e_phoff and e_phnum and e_phentsize:
+            for i in range(e_phnum):
+                off = e_phoff + i * e_phentsize
+                if off + e_phentsize > len(data):
+                    break
+                if ei_class == 1 and e_phentsize >= 24:
+                    p_type, p_offset, p_vaddr, _, p_filesz, p_memsz = struct.unpack_from(endian + "IIIIII", data, off)
+                elif ei_class == 2 and e_phentsize >= 48:
+                    p_type, _, p_offset, p_vaddr, _, p_filesz, p_memsz = struct.unpack_from(endian + "IIQQQQQ", data, off)
+                else:
+                    continue
+                if p_type == 1:  # PT_LOAD
+                    self._segments.append((p_vaddr, p_memsz, p_offset, p_filesz))
+
+        self.sections = []
+        if e_shoff and e_shnum and e_shentsize:
+            raw_shdrs = []
+            for i in range(e_shnum):
+                off = e_shoff + i * e_shentsize
+                if off + e_shentsize > len(data):
+                    break
+                if ei_class == 1 and e_shentsize >= 24:
+                    sh_name, sh_type, _, _, sh_offset, sh_size = struct.unpack_from(endian + "IIIIII", data, off)
+                elif ei_class == 2 and e_shentsize >= 40:
+                    sh_name, sh_type, _, _, sh_offset, sh_size = struct.unpack_from(endian + "IIQQQQ", data, off)
+                else:
+                    continue
+                raw_shdrs.append((sh_name, sh_type, sh_offset, sh_size))
+
+            shstrtab = b""
+            if 0 <= e_shstrndx < len(raw_shdrs):
+                _, _, str_off, str_sz = raw_shdrs[e_shstrndx]
+                shstrtab = data[str_off : str_off + str_sz]
+
+            for sh_name, sh_type, sh_offset, sh_size in raw_shdrs:
+                if sh_type == 0:  # SHT_NULL
+                    continue
+                if sh_name < len(shstrtab):
+                    end = shstrtab.find(b"\x00", sh_name)
+                    name = shstrtab[sh_name : end if end != -1 else None].decode("utf-8", errors="replace")
+                else:
+                    name = ""
+                self.sections.append(_ElfSection(name, sh_offset, sh_size))
+
+    def virtual_address_to_offset(self, vaddr):
+        for p_vaddr, p_memsz, p_offset, p_filesz in self._segments:
+            span = max(p_filesz, p_memsz)
+            if p_vaddr <= vaddr < p_vaddr + span:
+                return p_offset + (vaddr - p_vaddr)
+        return 0
+
 
 # # Abstracts the bin properties away from specific library calls enabling lief and pefile usage
 class bin_proxy:
@@ -359,18 +468,31 @@ class bin_proxy:
         self.abs_fpath = abs_fpath
         self.bin, self.type = None, None
 
+        magic = b""
+        try:
+            with open(abs_fpath, "rb") as fh:
+                magic = fh.read(4)
+        except OSError:
+            self.lib = None
+            return
+
         if lib:
             self.lib = lib
-        else:
-
-            if "pefile" in sys.modules:
+        elif magic.startswith(b"MZ"):
+            if pefile is not None:
                 self.lib = "pefile"
-            elif "lief" in sys.modules:
+            elif lief is not None:
                 self.lib = "lief"
             else:
-                # # We dont have a parser
                 self.lib = None
                 return
+        elif magic == b"\x7fELF":
+            self.lib = "builtin_elf"
+        elif lief is not None:
+            self.lib = "lief"
+        else:
+            self.lib = None
+            return
 
         self.__parse_bin()
 
@@ -380,9 +502,9 @@ class bin_proxy:
 
     def __parse_bin(self):
 
-        if self.lib == "lief":
+        if self.lib == "lief" and lief is not None:
             try:
-                self.bin = lief.parse(filepath=self.abs_fpath)
+                self.bin = lief.parse(self.abs_fpath)
                 if isinstance(self.bin, lief.PE.Binary):
                     self.type = "PE"
                     log.debug("Parsed with lief as: {}".format(self.type))
@@ -395,7 +517,7 @@ class bin_proxy:
             except Exception as e:
                 log.warning("Failed to parse with lief: {}".format(e))
 
-        elif self.lib == "pefile":
+        elif self.lib == "pefile" and pefile is not None:
             try:
                 self.bin = pefile.PE(self.abs_fpath, fast_load=True)
                 self.type = "PE"
@@ -404,6 +526,14 @@ class bin_proxy:
 
             except pefile.PEFormatError as e:
                 log.warning("Failed to parse with pefile: {}".format(e))
+
+        elif self.lib == "builtin_elf":
+            try:
+                self.bin = _SimpleELF(self.abs_fpath)
+                self.type = "ELF"
+                log.debug("Parsed with builtin ELF parser as: {}".format(self.type))
+            except Exception as e:
+                log.warning("Failed to parse ELF: {}".format(e))
 
     def close(self):
         if self.lib == "pefile" and self.bin is not None:
@@ -443,7 +573,7 @@ class section_proxy:
         self.lib = lib
         self.lib_section = lib_section
 
-        if self.lib == "lief":
+        if self.lib in ("lief", "builtin_elf"):
             self.name = lib_section.name
             self.offset = lib_section.offset
             self.size = lib_section.size
@@ -559,16 +689,20 @@ if __name__ == "__main__":
     args_dict["fname"] = os.path.basename(args.file)
     args_dict["abs_save_fpath"] = "{}.{}".format(os.path.basename(args_dict["abs_fpath"]), args.format)
 
-    plt, save_kwargs, json_data = generate(**args_dict)
+    fig = None
+    try:
+        fig, save_kwargs, json_data = generate(**args_dict)
+        fig.set_size_inches(*args.figsize, forward=True)
+        fig.tight_layout()
 
-    fig = plt.gcf()
-    fig.set_size_inches(*args.figsize, forward=True)
-
-    plt.tight_layout()
-
-    if args.showplt:
-        log.debug("Opening graph interactively")
-        plt.show()
-    else:
-        plt.savefig(args_dict["abs_save_fpath"], format=args.format, dpi=args.dpi, **save_kwargs)
-        log.info('Graph saved to: "{}"'.format(args_dict["abs_save_fpath"]))
+        if args.showplt:
+            log.debug("Opening graph interactively")
+            plt.show()
+        else:
+            fig.savefig(args_dict["abs_save_fpath"], format=args.format, dpi=args.dpi, **save_kwargs)
+            log.info('Graph saved to: "{}"'.format(args_dict["abs_save_fpath"]))
+    finally:
+        if fig is not None:
+            fig.clear()
+            if args.showplt:
+                plt.close(fig)

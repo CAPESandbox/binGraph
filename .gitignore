@@ -1,3 +1,13 @@
-
-graphs/.DS_Store
 .DS_Store
+graphs/.DS_Store
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/

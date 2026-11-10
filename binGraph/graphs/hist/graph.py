@@ -18,10 +18,10 @@ import numpy as np
 import matplotlib
 
 matplotlib.use("Agg")
+from matplotlib.figure import Figure
 import matplotlib.ticker as ticker
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
-from collections import Counter
 
 import logging
 
@@ -97,9 +97,6 @@ def args_validation(args):
 def generate(
     abs_fpath, fname, no_zero=__no_zero__, width=__width__, g_log=__g_log__, no_order=__no_order__, colours=__colours__, **kwargs
 ):
-    if "no_log" in kwargs and "g_log" not in kwargs:
-        g_log = kwargs["no_log"]
-
     file_array = np.fromfile(abs_fpath, dtype=np.uint8)
 
     log.debug('Read: "{}", length: {}'.format(fname, len(file_array)))
@@ -107,7 +104,11 @@ def generate(
     log.debug("Ignore 0's: {}".format(no_zero))
     start_byte = 1 if no_zero else 0
 
-    fig, ax = plt.subplots()
+    if kwargs.get("showplt", False):
+        fig, ax = plt.subplots()
+    else:
+        fig = Figure()
+        ax = fig.subplots()
 
     # # Add a byte hist ordered 1 > 255
     counts = np.bincount(file_array, minlength=256)
@@ -164,16 +165,17 @@ def generate(
         ax.set_xbound(lower=0, upper=255)
         log.debug("Setting xlim/xbounds to (0,255)")
 
-    plt.legend(loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.07), framealpha=1)
+    ax.legend(loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.07), framealpha=1)
 
-    plt.title("Byte histogram: {}\n".format(fname))
+    graphtitle = kwargs.get("graphtitle")
+    ax.set_title("{}\n".format(graphtitle) if graphtitle else "Byte histogram: {}\n".format(fname))
 
-    return plt, {}, {}
+    return fig, {}, {"title": graphtitle or fname}
 
 
 if __name__ == "__main__":
 
-    import argparse, sys
+    import argparse
 
     logging.basicConfig(stream=sys.stderr, format="%(levelname)s | %(message)s", level=logging.DEBUG)
     logging.getLogger("matplotlib").setLevel(logging.CRITICAL)
@@ -229,16 +231,20 @@ if __name__ == "__main__":
     args_dict["fname"] = os.path.basename(args.file)
     args_dict["abs_save_fpath"] = "{}.{}".format(os.path.basename(args_dict["abs_fpath"]), args.format)
 
-    plt, save_kwargs, json_data = generate(**args_dict)
+    fig = None
+    try:
+        fig, save_kwargs, json_data = generate(**args_dict)
+        fig.set_size_inches(*args.figsize, forward=True)
+        fig.tight_layout()
 
-    fig = plt.gcf()
-    fig.set_size_inches(*args.figsize, forward=True)
-
-    plt.tight_layout()
-
-    if args.showplt:
-        log.debug("Opening graph interactively")
-        plt.show()
-    else:
-        plt.savefig(args_dict["abs_save_fpath"], format=args.format, dpi=args.dpi, **save_kwargs)
-        log.info('Graph saved to: "{}"'.format(args_dict["abs_save_fpath"]))
+        if args.showplt:
+            log.debug("Opening graph interactively")
+            plt.show()
+        else:
+            fig.savefig(args_dict["abs_save_fpath"], format=args.format, dpi=args.dpi, **save_kwargs)
+            log.info('Graph saved to: "{}"'.format(args_dict["abs_save_fpath"]))
+    finally:
+        if fig is not None:
+            fig.clear()
+            if args.showplt:
+                plt.close(fig)

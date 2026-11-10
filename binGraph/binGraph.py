@@ -33,7 +33,8 @@ log.setLevel(logging.INFO)
 
 # ### Helper functions
 CWD = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, CWD)
+if not __package__ and CWD not in sys.path:
+    sys.path.insert(0, CWD)
 
 
 def File2Strings(filename):
@@ -145,15 +146,16 @@ def generate_graphs(args_dict):
 
     # # Set logging
     if args_dict.get("verbose", False):
-        logging.getLogger().setLevel(logging.DEBUG)
+        log.setLevel(logging.DEBUG)
         logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
     # # Detect if all graphs are being requested
-    __graphtypes__ = []
+    __graphtypes__ = {}
     if args_dict.get("graphtype", "") == "all":
         __graphtypes__ = graphs
     else:
-        __graphtypes__ = {args_dict["graphtype"]: graphs[args_dict["graphtype"]]}
+        graphtype = args_dict.get("graphtype", "ent")
+        __graphtypes__ = {graphtype: graphs[graphtype]}
 
     log.debug("Generating graphs: {}".format(", ".join(list(__graphtypes__.keys()))))
 
@@ -163,10 +165,10 @@ def generate_graphs(args_dict):
 
         for module_name, module in __graphtypes__.items():
             abs_save_fpath, fname, cleaned_fname = gen_names(
-                args_dict["format"],
+                args_dict.get("format", __figformat__),
                 abs_fpath,
-                args_dict["save_dir"],
-                save_prefix=args_dict["prefix"],
+                args_dict.get("save_dir", os.getcwd()),
+                save_prefix=args_dict.get("prefix"),
                 graphtype=module_name,
                 findex=(index if len(args_dict["files"]) > 1 else None),
             )
@@ -176,29 +178,35 @@ def generate_graphs(args_dict):
             run_args["cleaned_fname"] = cleaned_fname
 
             # # Generate and output the graph
-            plt = None
+            fig = None
             try:
-                plt, save_kwargs, json_data = module.generate(**run_args)
-                fig = plt.gcf()
-                fig.set_size_inches(*run_args["figsize"], forward=True)
+                fig, save_kwargs, json_data = module.generate(**run_args)
+                fig.set_size_inches(*run_args.get("figsize", __figsize__), forward=True)
 
-                plt.tight_layout()
+                fig.tight_layout()
 
-                if run_args["showplt"]:
+                if run_args.get("showplt", __showplt__):
+                    import matplotlib.pyplot as plt
+
                     log.info("Opening graph interactively")
                     plt.show()
 
-                elif run_args["json"]:
+                elif run_args.get("json", __json__):
                     log.info("Saving as json file")
 
                     output = {}
                     output["info"] = json_data
 
                     with io.BytesIO() as buf:
-                        plt.savefig(buf, format=run_args["format"], dpi=run_args["dpi"], **save_kwargs)
+                        fig.savefig(
+                            buf,
+                            format=run_args.get("format", __figformat__),
+                            dpi=run_args.get("dpi", __figdpi__),
+                            **save_kwargs,
+                        )
                         output["graph"] = base64.b64encode(buf.getvalue()).decode()
 
-                    output["cmdline"] = " ".join(run_args)
+                    output["cmdline"] = " ".join(sys.argv) if sys.argv else " ".join(run_args)
                     output["version"] = __version__
 
                     abs_save_fpath = os.path.splitext(abs_save_fpath)[0] + ".json"
@@ -208,13 +216,20 @@ def generate_graphs(args_dict):
                     log.info('Graph saved to: "{}"'.format(abs_save_fpath))
 
                 else:
-                    plt.savefig(abs_save_fpath, format=run_args["format"], dpi=run_args["dpi"], **save_kwargs)
+                    fig.savefig(
+                        abs_save_fpath,
+                        format=run_args.get("format", __figformat__),
+                        dpi=run_args.get("dpi", __figdpi__),
+                        **save_kwargs,
+                    )
                     log.info('Graph saved to: "{}"'.format(abs_save_fpath))
             finally:
-                if plt is not None:
-                    plt.clf()
-                    plt.cla()
-                    plt.close("all")
+                if fig is not None:
+                    fig.clear()
+                    if run_args.get("showplt", __showplt__):
+                        import matplotlib.pyplot as plt
+
+                        plt.close(fig)
 
 def main():
 
